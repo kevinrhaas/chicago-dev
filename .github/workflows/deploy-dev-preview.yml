@@ -77,6 +77,12 @@ jobs:
             bash "$RUNNER_TEMP/chicago-4d-clone.sh" dev
           git -C "$RUNNER_TEMP/src" log -1 --format='%H %cI %s'
 
+      # This repository's own assembler (.github/assemble-dev-preview.mjs).
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.run == 'true'
+        with:
+          sparse-checkout: .github
+
       - uses: actions/setup-node@v4
         if: steps.want.outputs.run == 'true'
         with:
