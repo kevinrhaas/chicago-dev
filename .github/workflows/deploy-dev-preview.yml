@@ -130,9 +130,13 @@ jobs:
 
       # Pages can report success and keep serving the older build for a while.
       # kevinrhaas/chicago's checker polls the served modules against the uploaded ones.
+      # The checker lives on kevinrhaas/chicago's main (dev's .github/ may lag it).
       - name: Verify the served preview is the one just uploaded
         if: steps.want.outputs.run == 'true'
         run: |
-          node "$RUNNER_TEMP/src/.github/chicago-4d-preview-freshness.mjs" \
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://raw.githubusercontent.com/${SOURCE_REPO}/main/.github/chicago-4d-preview-freshness.mjs" \
+            -o "$RUNNER_TEMP/chicago-4d-preview-freshness.mjs"
+          node "$RUNNER_TEMP/chicago-4d-preview-freshness.mjs" \
             --origin "$PREVIEW_ORIGIN" --preview-root site/4d/dev \
             --out "$RUNNER_TEMP/freshness.json"
