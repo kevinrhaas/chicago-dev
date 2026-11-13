@@ -1,0 +1,132 @@
+name: Deploy the dev preview
+
+# dev.chicago.polecat.live/4d/dev/ is the integration preview of kevinrhaas/chicago's
+# `dev` branch, on a GitHub Pages site of its own (2026-11-13; see
+# .github/assemble-dev-preview.mjs for why). This repository holds no app code: each
+# run clones kevinrhaas/chicago (public) at `dev`, runs its chicago/4d/tools/publish.sh,
+# and deploys the result here. Production at chicago.polecat.live is deployed only by
+# kevinrhaas/chicago's own deploy.yml, on an owner promotion.
+#
+# Triggers:
+#   workflow_dispatch   kevinrhaas/chicago's deploy.yml sends this after every push to
+#                       dev (it needs the CHICAGO_DEV_DISPATCH secret there), and anyone
+#                       can run it by hand.
+#   schedule            the fallback when that dispatch is missing or fails: every 15
+#                       minutes, and it stops after the first step when the preview
+#                       already shows dev's head.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this run (shown in the run list)
+        type: string
+        default: manual
+  schedule:
+    - cron: '4,19,34,49 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time. A newer queued run replaces an older queued one, and a
+# running deploy is never cut off halfway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      SOURCE_REPO: kevinrhaas/chicago
+      PREVIEW_ORIGIN: https://dev.chicago.polecat.live/
+    steps:
+      - name: Is dev ahead of the preview?
+        id: want
+        run: |
+          head="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" refs/heads/dev | cut -f1)"
+          [ -n "$head" ] || { echo "::error::could not read ${SOURCE_REPO} dev"; exit 1; }
+          live="$(curl -fsS --max-time 20 -H 'Cache-Control: no-cache' \
+            "${PREVIEW_ORIGIN}4d/dev/build.json?t=$(date +%s%N)" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha",""))' 2>/dev/null || true)"
+          echo "dev head ${head}; preview shows ${live:-nothing}"
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$live" ] && [ "${head#"$live"}" != "$head" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "preview is current; nothing to do"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      # The same bounded, retried partial clone production's deploy uses (T-0232),
+      # fetched from kevinrhaas/chicago's main and pointed at the public repository.
+      - name: Clone kevinrhaas/chicago at dev
+        if: steps.want.outputs.run == 'true'
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://raw.githubusercontent.com/${SOURCE_REPO}/main/.github/chicago-4d-clone.sh" \
+            -o "$RUNNER_TEMP/chicago-4d-clone.sh"
+          mkdir -p "$RUNNER_TEMP/src" && cd "$RUNNER_TEMP/src"
+          CLONE_URL_OVERRIDE="https://github.com/${SOURCE_REPO}.git" \
+          GITHUB_REPOSITORY="$SOURCE_REPO" GITHUB_TOKEN=unused-public-clone \
+            bash "$RUNNER_TEMP/chicago-4d-clone.sh" dev
+          git -C "$RUNNER_TEMP/src" log -1 --format='%H %cI %s'
+
+      - uses: actions/setup-node@v4
+        if: steps.want.outputs.run == 'true'
+        with:
+          node-version: '22'
+
+      - name: Publish the 4D app from dev
+        if: steps.want.outputs.run == 'true'
+        run: cd "$RUNNER_TEMP/src/chicago/4d" && bash tools/publish.sh
+
+      - name: Assemble the preview site
+        if: steps.want.outputs.run == 'true'
+        run: |
+          src="$RUNNER_TEMP/src"
+          sha="$(git -C "$src" rev-parse --short HEAD)"
+          when="$(git -C "$src" show -s --format=%cI HEAD)"
+          node .github/assemble-dev-preview.mjs "$src" "$sha" "$when" site
+          # The pages were rewritten (banner, stamp, noindex), so the offline year
+          # packs are listed again from what was written, with dev's own tool (T-2947).
+          if [ -f "$src/chicago/4d/tools/write_year_packs.mjs" ] && [ -d site/4d/dev/packs ]; then
+            node "$src/chicago/4d/tools/write_year_packs.mjs" site/4d/dev
+            node "$src/chicago/4d/tools/write_year_packs.mjs" --check site/4d/dev
+          fi
+
+      - name: Sanity-check JS parses
+        if: steps.want.outputs.run == 'true'
+        run: |
+          fail=0
+          for f in $(find site -name '*.js' -type f | sort); do
+            if ! node --input-type=module --check < "$f" >/dev/null 2>&1; then
+              node --check "$f" >/dev/null 2>&1 || { echo "SYNTAX FAIL: $f"; fail=1; }
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "JS OK"
+
+      - uses: actions/configure-pages@v5
+        if: steps.want.outputs.run == 'true'
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.want.outputs.run == 'true'
+        with:
+          path: site
+          retention-days: 7
+      - id: deployment
+        if: steps.want.outputs.run == 'true'
+        uses: actions/deploy-pages@v4
+
+      # Pages can report success and keep serving the older build for a while.
+      # kevinrhaas/chicago's checker polls the served modules against the uploaded ones.
+      - name: Verify the served preview is the one just uploaded
+        if: steps.want.outputs.run == 'true'
+        run: |
+          node "$RUNNER_TEMP/src/.github/chicago-4d-preview-freshness.mjs" \
+            --origin "$PREVIEW_ORIGIN" --preview-root site/4d/dev \
+            --out "$RUNNER_TEMP/freshness.json"
