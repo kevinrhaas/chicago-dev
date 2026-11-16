@@ -54,10 +54,23 @@ for (const item of await readdir(SRC)) {
   await cp(join(SRC, item), join(OUT, item), { recursive: true });
 }
 
+// The public site (kevinrhaas/chicago site/: the home page and its feature pages) is
+// previewed at this host's root too, so a change to it can be seen before a promotion
+// (owner, 2026-11-16, T-3611). The three atlas viewers stay production's: they are about
+// 132 MiB this site does not need, and the 404 page below sends their paths there.
+const LANDING = join(srcRoot, 'site');
+const ATLASES = ['pre-fire', 'prairie-1904', 'rebuilding-1870s'];
+let landingPages = 0;
+for (const item of await readdir(LANDING)) {
+  if (['4d', 'CNAME', '.git', ...ATLASES].includes(item)) continue;
+  await cp(join(LANDING, item), join(outSite, item), { recursive: true });
+  if ((await stat(join(LANDING, item))).isDirectory() ? existsSync(join(LANDING, item, 'index.html')) : item === 'index.html') landingPages++;
+}
+
 const stamp = `dev${sha ? `@${sha}` : ''}`;
 const when = ct(committedIso);
 const gateStamp = `DEV PREVIEW · ${stamp}${when ? ` · ${when}` : ''}`;
-for (const file of await htmlFiles(OUT)) {
+for (const file of await htmlFiles(outSite)) {
   let html = await readFile(file, 'utf8');
   if (/<meta[^>]*name="robots"/i.test(html)) {
     html = html.replace(/<meta[^>]*name="robots"[^>]*\/?>/gi, '<meta name="robots" content="noindex,nofollow">');
@@ -85,17 +98,19 @@ await writeFile(join(OUT, 'build.json'), `${JSON.stringify({
 await writeFile(join(outSite, 'robots.txt'), 'User-agent: *\nDisallow: /\n');
 await writeFile(join(outSite, 'CNAME'), `${HOST}\n`);
 await writeFile(join(outSite, '.nojekyll'), '');
-// Anything outside /4d/dev/ on this host goes to the preview, keeping the rest of
-// the path, so dev.chicago.polecat.live/1904/ lands on /4d/dev/1904/.
+// Anything else on this host that is not found goes to the preview, keeping the rest
+// of the path, so dev.chicago.polecat.live/1904/ and the home page's own links to
+// 4d/1904/ land on /4d/dev/1904/. The atlas viewers go to production.
 const redirect = `<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex,nofollow">
 <title>Chicago 4D dev preview</title>
-<script>(function(){var l=location.pathname;if(/^\\/4d\\/dev\\//.test(l))return;var p=l.replace(/^\\/(4d\\/)?/,"");location.replace("/4d/dev/"+p+location.search+location.hash)})();</script>
+<script>(function(){var l=location.pathname;if(/^\\/4d\\/dev\\//.test(l))return;if(/^\\/(${ATLASES.join('|')})\\//.test(l)){location.replace("https://chicago.polecat.live"+l+location.search+location.hash);return}var p=l.replace(/^\\/(4d\\/)?/,"");location.replace("/4d/dev/"+p+location.search+location.hash)})();</script>
 <p>Not found. <a href="/4d/dev/">Open the dev preview</a></p>\n`;
-await writeFile(join(outSite, 'index.html'), redirect);
+// The root is the public site's home page when dev has one, else the redirect as before.
+if (!existsSync(join(outSite, 'index.html'))) await writeFile(join(outSite, 'index.html'), redirect);
 await writeFile(join(outSite, '404.html'), redirect);
 
 const bytes = await total(outSite);
-console.log(`dev-preview: assembled ${OUT} from ${SRC}${sha ? ` (${sha})` : ''}: ${(bytes / 1048576).toFixed(3)} MiB`);
+console.log(`dev-preview: assembled ${OUT} from ${SRC}${sha ? ` (${sha})` : ''}, and ${landingPages} public-site pages at the root: ${(bytes / 1048576).toFixed(3)} MiB`);
 if (bytes > LIMIT) {
   console.error(`::error::the preview is ${bytes} bytes, over the ${LIMIT}-byte Pages limit`);
   process.exit(1);
